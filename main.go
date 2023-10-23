@@ -283,7 +283,7 @@ func httpsWorks(myIp string) bool {
 		},
 	}
 	client := &http.Client{Transport: tr}
-	_, err := client.Get(fmt.Sprintf("https://%s/"))
+	_, err := client.Get(fmt.Sprintf("https://%s/", *vlessDomain))
 	return err == nil
 }
 
