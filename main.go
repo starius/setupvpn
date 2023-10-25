@@ -426,7 +426,8 @@ const singboxConfigTemplate = `{
 }
 `
 
-const nekoboxConfigTemplate = `vless://%[3]q@%[1]q:443/?type=tcp&encryption=none&flow=xtls-rprx-vision&sni=%[2]q&alpn=h2&fp=chrome&security=reality&pbk=%[4]q&sid=%[5]q&packetEncoding=xudp#conn1`
+const nekoboxConfigTemplate = `vless://%[3]q@%[1]q:443/?type=tcp&encryption=none&flow=xtls-rprx-vision&sni=%[2]q&alpn=h2&fp=chrome&security=reality&pbk=%[4]q&sid=%[5]q&packetEncoding=xudp#conn1
+`
 
 func generateClientConfigs(publicKeyHex, userID string, shortIds []string, myIp string) {
 	dir, err := os.MkdirTemp("", "vless-configs-*")
