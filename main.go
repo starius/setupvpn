@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -37,7 +36,7 @@ const (
 
 var (
 	skipVless   = flag.Bool("skip-vless", false, "Skip installing VLESS")
-	vlessDomain = flag.String("vless-domain", "google.com", "Masking domain used by VLESS server")
+	vlessDomain = flag.String("vless-domain", "www.google.com", "Masking domain used by VLESS server")
 	nClients    = flag.Int("n-clients", 50, "Number of client configs to generate")
 )
 
@@ -87,7 +86,7 @@ func getMyIp() string {
 	}
 	defer req.Body.Close()
 
-	body, err := ioutil.ReadAll(req.Body)
+	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		panic(err)
 	}
@@ -265,6 +264,22 @@ net.ipv4.tcp_congestion_control=bbr
 	if err := cmd.Run(); err != nil {
 		panic(err)
 	}
+
+	qdisk, err := os.ReadFile("/proc/sys/net/core/default_qdisc")
+	if err != nil {
+		panic(err)
+	}
+	if string(bytes.TrimSpace(qdisk)) != "fq" {
+		fmt.Println("Warning! Failed to set /proc/sys/net/core/default_qdisc")
+	}
+
+	tcc, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control")
+	if err != nil {
+		panic(err)
+	}
+	if string(bytes.TrimSpace(tcc)) != "bbr" {
+		fmt.Println("Warning! Failed to set /proc/sys/net/ipv4/tcp_congestion_control")
+	}
 }
 
 func httpsWorks(myIp string) bool {
@@ -287,6 +302,17 @@ func httpsWorks(myIp string) bool {
 	return err == nil
 }
 
+func checkTcpServer(address string) bool {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return false
+	}
+	if err := conn.Close(); err != nil {
+		panic(err)
+	}
+	return true
+}
+
 func startAndCheckVless(myIp string) {
 	if httpsWorks(myIp) {
 		panic("control check for https proxying passed before starting the service")
@@ -299,6 +325,11 @@ func startAndCheckVless(myIp string) {
 	cmd := exec.Command(systemctlExe, "restart", "xray")
 	if err := cmd.Run(); err != nil {
 		panic(err)
+	}
+
+	for !checkTcpServer(fmt.Sprintf("%s:443", myIp)) {
+		fmt.Println("Waiting for server to start on port 443.")
+		time.Sleep(time.Second)
 	}
 
 	if !httpsWorks(myIp) {
@@ -418,7 +449,7 @@ func generateClientConfigs(publicKeyHex, userID string, shortIds []string, myIp 
 		}
 	}
 
-	const readmeContent = `To run on Linux, download https://github.com/SagerNet/sing-box/releases/download/v1.3.6/sing-box-1.3.6-linux-amd64v3.tar.gz
+	readmeContent := fmt.Sprintf(`To run on Linux, download https://github.com/SagerNet/sing-box/releases/download/v1.3.6/sing-box-1.3.6-linux-amd64v3.tar.gz
 (Sha256 is 10f0c2f12e594af112594af9e54fae0c0d79cd91d2460d09377a89176a24141f )
 Run:
 $ sudo sing-box run -c sing-box-config-01.json
@@ -430,8 +461,11 @@ then open any of nekobox-link-XX.txt, copy the link, click (+) button and
 select "Import from clipboard". Enable the tunnel by clicking pink
 button in the bottom of the app.
 
+Server config: %s
+Restart server: systemctl restart xray
+
 See https://forum.qubes-os.org/t/vless-obfuscation-vpn/20438 for more info.
-`
+`, xrayConfig)
 	if err := os.WriteFile(filepath.Join(dir, "README"), []byte(readmeContent), 0644); err != nil {
 		panic(err)
 	}
@@ -447,8 +481,12 @@ func installVless() {
 		panic(err)
 	}
 
-	privateKeyHex, publicKeyHex, userID, shortIds := generateVlessParams()
 	myIp := getMyIp()
+	if checkTcpServer(fmt.Sprintf("%s:443", myIp)) {
+		panic("port 443 on the machine is already used")
+	}
+
+	privateKeyHex, publicKeyHex, userID, shortIds := generateVlessParams()
 	installVlessExe()
 	installVlessConfig(privateKeyHex, userID, shortIds)
 	installVlessService()
