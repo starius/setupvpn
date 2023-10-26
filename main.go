@@ -139,7 +139,7 @@ func installVlessConfig(privateKeyHex, userID string, shortIds []string) {
 
 	var xrayConfigContent = fmt.Sprintf(`{
   "log": {
-    "loglevel": "info"
+    "loglevel": "none"
   },
   "routing": {
     "rules": [],
@@ -180,7 +180,7 @@ func installVlessConfig(privateKeyHex, userID string, shortIds []string) {
         }
       },
       "sniffing": {
-        "enabled": true,
+        "enabled": false,
         "destOverride": [
           "http",
           "tls"
