@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,12 +33,18 @@ const (
 	xrayConfig  = xrayDir + "/config.json"
 	xrayService = "/usr/lib/systemd/system/xray.service"
 	sysctlConf  = "/etc/sysctl.conf"
+
+	wireguardDir  = "/etc/wireguard"
+	wireguardConf = wireguardDir + "/wg0.conf"
 )
 
 var (
-	skipVless   = flag.Bool("skip-vless", false, "Skip installing VLESS")
-	vlessDomain = flag.String("vless-domain", "www.google.com", "Masking domain used by VLESS server")
-	nClients    = flag.Int("n-clients", 50, "Number of client configs to generate")
+	skipVless     = flag.Bool("skip-vless", false, "Skip installing VLESS")
+	skipWireguard = flag.Bool("skip-wireguard", false, "Skip installing Wireguard")
+	serverIp      = flag.String("server-ip", "", "Server IP address (leave empty to determine automatically)")
+	vlessDomain   = flag.String("vless-domain", "www.google.com", "Masking domain used by VLESS server")
+	nClients      = flag.Int("n-clients", 50, "Number of client configs to generate")
+	wireguardPort = flag.Int("wireguard-port", 0, "Port for wireguard to listen in (0 = random)")
 )
 
 func installVlessExe() {
@@ -76,6 +83,10 @@ func installVlessExe() {
 }
 
 func getMyIp() string {
+	if *serverIp != "" {
+		return *serverIp
+	}
+
 	type IP struct {
 		Query string
 	}
@@ -97,6 +108,23 @@ func getMyIp() string {
 	}
 
 	return ip.Query
+}
+
+func getWireguardPort() int {
+	if *wireguardPort != 0 {
+		return *wireguardPort
+	}
+	// Generate random port > 1024.
+	for {
+		portBytes := make([]byte, 2)
+		if _, err := rand.Read(portBytes); err != nil {
+			panic(err)
+		}
+		port := int(portBytes[0])<<8 | int(portBytes[1])
+		if port > 1024 {
+			return port
+		}
+	}
 }
 
 func generateVlessParams() (privateKeyHex, publicKeyHex, userID string, shortIds []string) {
@@ -429,7 +457,7 @@ const singboxConfigTemplate = `{
 const nekoboxConfigTemplate = `vless://%[3]s@%[1]s:443/?type=tcp&encryption=none&flow=xtls-rprx-vision&sni=%[2]s&alpn=h2&fp=chrome&security=reality&pbk=%[4]s&sid=%[5]s&packetEncoding=xudp#conn1
 `
 
-func generateClientConfigs(publicKeyHex, userID string, shortIds []string, myIp string) {
+func generateVlessClientConfigs(publicKeyHex, userID string, shortIds []string, myIp string) {
 	dir, err := os.MkdirTemp("", "vless-configs-*")
 	if err != nil {
 		panic(err)
@@ -471,20 +499,19 @@ See https://forum.qubes-os.org/t/vless-obfuscation-vpn/20438 for more info.
 		panic(err)
 	}
 
-	fmt.Printf("Configs were written to directory %s\n", dir)
+	fmt.Printf("VLESS configs were written to directory %s\n", dir)
 	fmt.Printf("See %s/README\n", dir)
 }
 
-func installVless() {
+func installVless(myIp string) {
+	if checkTcpServer(fmt.Sprintf("%s:443", myIp)) {
+		panic("port 443 on the machine is already used")
+	}
+
 	if err := os.Mkdir(xrayDir, 0755); os.IsExist(err) {
 		panic("Remove " + xrayDir)
 	} else if err != nil {
 		panic(err)
-	}
-
-	myIp := getMyIp()
-	if checkTcpServer(fmt.Sprintf("%s:443", myIp)) {
-		panic("port 443 on the machine is already used")
 	}
 
 	privateKeyHex, publicKeyHex, userID, shortIds := generateVlessParams()
@@ -494,13 +521,209 @@ func installVless() {
 	improvePerformace()
 	startAndCheckVless(myIp)
 
-	generateClientConfigs(publicKeyHex, userID, shortIds, myIp)
+	generateVlessClientConfigs(publicKeyHex, userID, shortIds, myIp)
+}
+
+func generateWireguardKeys() (privateKey, publicKey string) {
+	wgExe, err := exec.LookPath("wg")
+	if err != nil {
+		panic(err)
+	}
+	privateKeyBytes, err := exec.Command(wgExe, "genkey").Output()
+	if err != nil {
+		panic(err)
+	}
+	cmd := exec.Command(wgExe, "pubkey")
+	cmd.Stdin = bytes.NewReader(privateKeyBytes)
+	publicKeyBytes, err := cmd.Output()
+	if err != nil {
+		panic(err)
+	}
+	return string(bytes.TrimSpace(privateKeyBytes)), string(bytes.TrimSpace(publicKeyBytes))
+}
+
+type WireguardPeer struct {
+	PrivateKey string
+	PublicKey  string
+}
+
+const wg0Template = `[Interface]
+PrivateKey = {{ .PrivateKey }}
+Address = 192.168.30.1/32
+ListenPort = {{ .Port }}
+PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -A FORWARD -i %i -o %i -j DROP; iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -o %i -j DROP; iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+{{ range $i, $peer := .Peers }}
+[Peer]
+PublicKey = {{ $peer.PublicKey }}
+AllowedIPs = 192.168.30.{{ add 2 $i }}/32
+{{ end }}
+`
+
+func installWireguardConfig(serverPrivate string, port int, peers []WireguardPeer) {
+	funcs := template.FuncMap{
+		"add": func(a, b int) int {
+			return a + b
+		},
+	}
+	tmpl := template.Must(template.New("wg0Template").Funcs(funcs).Parse(wg0Template))
+	vars := struct {
+		PrivateKey string
+		Port       int
+		Peers      []WireguardPeer
+	}{
+		PrivateKey: serverPrivate,
+		Port:       port,
+		Peers:      peers,
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, vars); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(wireguardConf, buf.Bytes(), 0600); err != nil {
+		panic(err)
+	}
+}
+
+func startWireguard() {
+	wgQuickExe, err := exec.LookPath("wg-quick")
+	if err != nil {
+		panic(err)
+	}
+	cmd := exec.Command(wgQuickExe, "up", "wg0")
+	if err := cmd.Run(); err != nil {
+		panic(err)
+	}
+}
+
+func installWireguardService() {
+	systemctlExe, err := exec.LookPath("systemctl")
+	if err != nil {
+		panic(err)
+	}
+	cmd := exec.Command(systemctlExe, "enable", "wg-quick@wg0.service")
+	if err := cmd.Run(); err != nil {
+		panic(err)
+	}
+}
+
+const wgClientTemplate = `[Interface]
+PrivateKey = {{ .ClientPrivateKey }}
+Address = 192.168.66.{{ add 2 .ClientIndex }}/32
+DNS = 1.1.1.1
+PostUp = iptables -t nat -I PREROUTING 1 -p udp -m udp --dport 53 -j DNAT --to-destination 1.1.1.1; iptables -t nat -I POSTROUTING 3 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+[Peer]
+PublicKey = {{ .ServerPublicKey }}
+Endpoint = {{ .ServerIp }}:{{ .ServerPort }}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+`
+
+func generateWireguardClientConfigs(myIp, serverPublic string, port int, peers []WireguardPeer) {
+	dir, err := os.MkdirTemp("", "wireguard-configs-*")
+	if err != nil {
+		panic(err)
+	}
+
+	funcs := template.FuncMap{
+		"add": func(a, b int) int {
+			return a + b
+		},
+	}
+	tmpl := template.Must(template.New("wgClientTemplate").Funcs(funcs).Parse(wgClientTemplate))
+
+	for i, peer := range peers {
+		vars := struct {
+			ServerPublicKey  string
+			ServerIp         string
+			ServerPort       int
+			ClientIndex      int
+			ClientPrivateKey string
+		}{
+			ServerPublicKey:  serverPublic,
+			ServerIp:         myIp,
+			ServerPort:       port,
+			ClientIndex:      i,
+			ClientPrivateKey: peer.PrivateKey,
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, vars); err != nil {
+			panic(err)
+		}
+		name := fmt.Sprintf("wg%02d.conf", i+2)
+		if err := os.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0600); err != nil {
+			panic(err)
+		}
+	}
+
+	readmeContent := fmt.Sprintf(`To run on Linux, install wireguard.
+
+On Debian 11+:
+$ sudo apt-get install wireguard resolvconf
+$ sudo modprobe wireguard
+$ echo $?
+0
+
+Copy one of client files (e.g. wg02.conf) to /etc/wireguard/wg02.conf and run:
+$ sudo wg-quick up wg02
+
+Check connection. If everything works well, run to start it automatically:
+$ sudo systemctl enable wg-quick@wg02.service
+
+If you want to put the config somewhere else (e.g. /home/user/wg02.conf),
+you can use the following command to start it manually:
+$ sudo wg-quick up /home/user/wg02.conf
+
+To run on mobile, install Wireguard from Play store or App store and import
+config file to it. Remove PostUp section from the config, it is not needed.
+
+Server config: %s
+Restart server: sudo wg-quick down wg0 ; sudo wg-quick up wg0
+
+See https://forum.qubes-os.org/t/wireguard/19082 for more info.
+`, wireguardConf)
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte(readmeContent), 0644); err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("Wireguard configs were written to directory %s\n", dir)
+	fmt.Printf("See %s/README\n", dir)
+}
+
+func installWireguard(myIp string) {
+	if _, err := os.Stat(wireguardDir); os.IsNotExist(err) {
+		panic("Wireguard dir does not exist: " + wireguardDir + " . Install wireguard: sudo apt-get install wireguard resolvconf")
+	}
+	if _, err := os.Stat(wireguardConf); err == nil {
+		panic("Wireguard conf already exists: " + wireguardConf)
+	}
+
+	serverPrivate, serverPublic := generateWireguardKeys()
+	port := getWireguardPort()
+	peers := make([]WireguardPeer, 0, *nClients)
+	for i := 0; i < *nClients; i++ {
+		peerPrivate, peerPublic := generateWireguardKeys()
+		peers = append(peers, WireguardPeer{
+			PrivateKey: peerPrivate,
+			PublicKey:  peerPublic,
+		})
+	}
+	installWireguardConfig(serverPrivate, port, peers)
+	startWireguard()
+	installWireguardService()
+	generateWireguardClientConfigs(myIp, serverPublic, port, peers)
 }
 
 func main() {
 	flag.Parse()
 
+	myIp := getMyIp()
 	if !*skipVless {
-		installVless()
+		installVless(myIp)
+	}
+
+	if !*skipWireguard {
+		installWireguard(myIp)
 	}
 }
