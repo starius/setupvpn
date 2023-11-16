@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -21,8 +23,10 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/Luzifer/go-openssl/v4"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/curve25519"
+	"golang.org/x/term"
 )
 
 const (
@@ -39,6 +43,7 @@ const (
 )
 
 var (
+	encrypt       = flag.Bool("encrypt", false, "Put client configs into encrypted zip")
 	skipVless     = flag.Bool("skip-vless", false, "Skip installing VLESS")
 	skipWireguard = flag.Bool("skip-wireguard", false, "Skip installing Wireguard")
 	serverIp      = flag.String("server-ip", "", "Server IP address (leave empty to determine automatically)")
@@ -457,12 +462,12 @@ const singboxConfigTemplate = `{
 const nekoboxConfigTemplate = `vless://%[3]s@%[1]s:443/?type=tcp&encryption=none&flow=xtls-rprx-vision&sni=%[2]s&alpn=h2&fp=chrome&security=reality&pbk=%[4]s&sid=%[5]s&packetEncoding=xudp#conn1
 `
 
-func generateVlessClientConfigs(publicKeyHex, userID string, shortIds []string, myIp string) {
-	dir, err := os.MkdirTemp("", "vless-configs-*")
-	if err != nil {
-		panic(err)
-	}
+type file struct {
+	name    string
+	content []byte
+}
 
+func generateVlessClientConfigs(publicKeyHex, userID string, shortIds []string, myIp string) (files []file) {
 	for i := 1; i <= *nClients; i++ {
 		var name, configTemplate string
 		if i < *nClients/2 {
@@ -473,9 +478,10 @@ func generateVlessClientConfigs(publicKeyHex, userID string, shortIds []string, 
 			configTemplate = nekoboxConfigTemplate
 		}
 		config := fmt.Sprintf(configTemplate, myIp, *vlessDomain, userID, publicKeyHex, shortIds[i-1])
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(config), 0644); err != nil {
-			panic(err)
-		}
+		files = append(files, file{
+			name:    name,
+			content: []byte(config),
+		})
 	}
 
 	readmeContent := fmt.Sprintf(`To run on Linux, download https://github.com/SagerNet/sing-box/releases/download/v1.3.6/sing-box-1.3.6-linux-amd64v3.tar.gz
@@ -495,15 +501,15 @@ Restart server: systemctl restart xray
 
 See https://forum.qubes-os.org/t/vless-obfuscation-vpn/20438 for more info.
 `, xrayConfig)
-	if err := os.WriteFile(filepath.Join(dir, "README"), []byte(readmeContent), 0644); err != nil {
-		panic(err)
-	}
+	files = append(files, file{
+		name:    "README",
+		content: []byte(readmeContent),
+	})
 
-	fmt.Printf("VLESS configs were written to directory %s\n", dir)
-	fmt.Printf("See %s/README\n", dir)
+	return files
 }
 
-func installVless(myIp string) {
+func installVless(myIp string) []file {
 	if checkTcpServer(fmt.Sprintf("%s:443", myIp)) {
 		panic("port 443 on the machine is already used")
 	}
@@ -521,7 +527,7 @@ func installVless(myIp string) {
 	improvePerformace()
 	startAndCheckVless(myIp)
 
-	generateVlessClientConfigs(publicKeyHex, userID, shortIds, myIp)
+	return generateVlessClientConfigs(publicKeyHex, userID, shortIds, myIp)
 }
 
 func generateWireguardKeys() (privateKey, publicKey string) {
@@ -620,12 +626,7 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 `
 
-func generateWireguardClientConfigs(myIp, serverPublic string, port int, peers []WireguardPeer) {
-	dir, err := os.MkdirTemp("", "wireguard-configs-*")
-	if err != nil {
-		panic(err)
-	}
-
+func generateWireguardClientConfigs(myIp, serverPublic string, port int, peers []WireguardPeer) (files []file) {
 	funcs := template.FuncMap{
 		"add": func(a, b int) int {
 			return a + b
@@ -652,9 +653,10 @@ func generateWireguardClientConfigs(myIp, serverPublic string, port int, peers [
 			panic(err)
 		}
 		name := fmt.Sprintf("wg%02d.conf", i+2)
-		if err := os.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0600); err != nil {
-			panic(err)
-		}
+		files = append(files, file{
+			name:    name,
+			content: buf.Bytes(),
+		})
 	}
 
 	readmeContent := fmt.Sprintf(`To run on Linux, install wireguard.
@@ -683,15 +685,15 @@ Restart server: sudo wg-quick down wg0 ; sudo wg-quick up wg0
 
 See https://forum.qubes-os.org/t/wireguard/19082 for more info.
 `, wireguardConf)
-	if err := os.WriteFile(filepath.Join(dir, "README"), []byte(readmeContent), 0644); err != nil {
-		panic(err)
-	}
+	files = append(files, file{
+		name:    "README",
+		content: []byte(readmeContent),
+	})
 
-	fmt.Printf("Wireguard configs were written to directory %s\n", dir)
-	fmt.Printf("See %s/README\n", dir)
+	return files
 }
 
-func installWireguard(myIp string) {
+func installWireguard(myIp string) []file {
 	if _, err := os.Stat(wireguardDir); os.IsNotExist(err) {
 		panic("Wireguard dir does not exist: " + wireguardDir + " . Install wireguard: sudo apt-get install wireguard resolvconf")
 	}
@@ -712,18 +714,93 @@ func installWireguard(myIp string) {
 	installWireguardConfig(serverPrivate, port, peers)
 	startWireguard()
 	installWireguardService()
-	generateWireguardClientConfigs(myIp, serverPublic, port, peers)
+
+	return generateWireguardClientConfigs(myIp, serverPublic, port, peers)
 }
 
 func main() {
 	flag.Parse()
 
 	myIp := getMyIp()
+
+	dir2files := map[string][]file{}
 	if !*skipVless {
-		installVless(myIp)
+		dir2files["vless"] = installVless(myIp)
+	}
+	if !*skipWireguard {
+		dir2files["wireguard"] = installWireguard(myIp)
 	}
 
-	if !*skipWireguard {
-		installWireguard(myIp)
+	if *encrypt {
+		var buf bytes.Buffer
+		gzw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gzw)
+		for dir, files := range dir2files {
+			for _, f := range files {
+				hdr := &tar.Header{
+					Name: filepath.Join(dir, f.name),
+					Mode: 0600,
+					Size: int64(len(f.content)),
+				}
+				if err := tw.WriteHeader(hdr); err != nil {
+					panic(err)
+				}
+				if _, err := tw.Write(f.content); err != nil {
+					panic(err)
+				}
+			}
+		}
+		if err := tw.Close(); err != nil {
+			panic(err)
+		}
+		if err := gzw.Close(); err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Encryption password for client configs: ")
+		passphrase, err := term.ReadPassword(int(os.Stdin.Fd()))
+		if err != nil {
+			panic(err)
+		}
+		enc, err := openssl.New().EncryptBytes(string(passphrase), buf.Bytes(), openssl.PBKDF2SHA256)
+		if err != nil {
+			panic(err)
+		}
+
+		f, err := os.CreateTemp("", "setupvpn-configs-*.tar.gz.enc")
+		if err != nil {
+			panic(err)
+		}
+		n, err := f.Write(enc)
+		if err != nil {
+			panic(err)
+		}
+		if n != len(enc) {
+			panic("short write")
+		}
+		encFile := f.Name()
+		if err := f.Close(); err != nil {
+			panic(err)
+		}
+		fmt.Printf("Client configs were compressed and encrypted and written to file %s\n", encFile)
+		fmt.Println("Copy the file to safe place and unpack using the following command:")
+		fmt.Printf("openssl enc -d -base64 -A -aes-256-cbc -pbkdf2 -md sha256 -in %s -out - | tar -xzf-\n", filepath.Base(encFile))
+	} else {
+		root, err := os.MkdirTemp("", "setupvpn-configs-*")
+		if err != nil {
+			panic(err)
+		}
+		for dir, files := range dir2files {
+			if err := os.Mkdir(filepath.Join(root, dir), 0700); err != nil {
+				panic(err)
+			}
+			for _, f := range files {
+				path := filepath.Join(root, dir, f.name)
+				if err := os.WriteFile(path, []byte(f.content), 0600); err != nil {
+					panic(err)
+				}
+			}
+		}
+		fmt.Printf("Client configs were written to directory %s\n", root)
 	}
 }
