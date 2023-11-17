@@ -762,6 +762,7 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
+		fmt.Println()
 		enc, err := openssl.New().EncryptBytes(string(passphrase), buf.Bytes(), openssl.PBKDF2SHA256)
 		if err != nil {
 			panic(err)
