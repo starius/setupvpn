@@ -3,7 +3,8 @@ Server-side wireguard and VLESS installer written in Go
 
 Build the binary:
 ```
-$ CGO_ENABLED=0 go build -ldflags="-s -w"
+$ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -o setupvpn-amd64
+$ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -o setupvpn-arm64
 ```
 
 Or get the binary from https://github.com/starius/setupvpn/releases
