@@ -30,8 +30,6 @@ import (
 )
 
 const (
-	vlessUrl    = "https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-64.zip"
-	vlessSha256 = "2a855f610008a598b88424435aefaee1df2c1b0fa1296d4f8f60080b528c9971"
 	xrayDir     = "/opt/xray"
 	xrayExe     = xrayDir + "/xray"
 	xrayConfig  = xrayDir + "/config.json"
@@ -486,6 +484,11 @@ func generateVlessClientConfigs(publicKeyHex, userID string, shortIds []string, 
 
 	readmeContent := fmt.Sprintf(`To run on Linux, download https://github.com/SagerNet/sing-box/releases/download/v1.3.6/sing-box-1.3.6-linux-amd64v3.tar.gz
 (Sha256 is 10f0c2f12e594af112594af9e54fae0c0d79cd91d2460d09377a89176a24141f )
+
+Version for arm64 is:
+https://github.com/SagerNet/sing-box/releases/download/v1.3.6/sing-box-1.3.6-linux-arm64.tar.gz
+5761eaf3ca9a996b4592975cbdf4ad7e1b7accf7719a8bbc659df88301e5911c
+
 Run:
 $ sudo sing-box run -c sing-box-config-01.json
 Use any of sing-box-config-XX.json
