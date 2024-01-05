@@ -618,7 +618,7 @@ func installWireguardService() {
 
 const wgClientTemplate = `[Interface]
 PrivateKey = {{ .ClientPrivateKey }}
-Address = 192.168.66.{{ add 2 .ClientIndex }}/32
+Address = 192.168.30.{{ add 2 .ClientIndex }}/32
 DNS = 1.1.1.1
 PostUp = iptables -t nat -I PREROUTING 1 -p udp -m udp --dport 53 -j DNAT --to-destination 1.1.1.1; iptables -t nat -I POSTROUTING 3 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
