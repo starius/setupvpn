@@ -35,6 +35,7 @@ const (
 	xrayConfig  = xrayDir + "/config.json"
 	xrayService = "/usr/lib/systemd/system/xray.service"
 	sysctlConf  = "/etc/sysctl.conf"
+	sysctlDir   = "/etc/sysctl.d"
 
 	wireguardDir  = "/etc/wireguard"
 	wireguardConf = wireguardDir + "/wg0.conf"
@@ -273,19 +274,38 @@ WantedBy=multi-user.target
 	}
 }
 
-func improvePerformace() {
-	var sysctlConfAppendix = `
+func writePerformanceConfig(configDir, fallbackPath string) (string, error) {
+	const settings = `
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 `
-	f, err := os.OpenFile(sysctlConf, os.O_WRONLY|os.O_APPEND, 0)
-	if err != nil {
-		panic(err)
+	if info, err := os.Stat(configDir); err == nil {
+		if !info.IsDir() {
+			return "", fmt.Errorf("%s is not a directory", configDir)
+		}
+		path := filepath.Join(configDir, "99-setupvpn.conf")
+		return path, os.WriteFile(path, []byte(settings), 0644)
+	} else if !os.IsNotExist(err) {
+		return "", err
 	}
-	if _, err := f.Write([]byte(sysctlConfAppendix)); err != nil {
-		panic(err)
+
+	f, err := os.OpenFile(fallbackPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.Write([]byte(settings)); err != nil {
+		f.Close()
+		return "", err
 	}
 	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return fallbackPath, nil
+}
+
+func improvePerformace() {
+	configPath, err := writePerformanceConfig(sysctlDir, sysctlConf)
+	if err != nil {
 		panic(err)
 	}
 
@@ -293,7 +313,7 @@ net.ipv4.tcp_congestion_control=bbr
 	if err != nil {
 		panic(err)
 	}
-	cmd := exec.Command(sysctlExe, "-p")
+	cmd := exec.Command(sysctlExe, "-p", configPath)
 	if err := cmd.Run(); err != nil {
 		panic(err)
 	}
