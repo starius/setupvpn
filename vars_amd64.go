@@ -1,6 +1,6 @@
 package main
 
 const (
-	vlessUrl    = "https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-64.zip"
-	vlessSha256 = "2a855f610008a598b88424435aefaee1df2c1b0fa1296d4f8f60080b528c9971"
+	vlessUrl    = "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip"
+	vlessSha256 = "e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214"
 )

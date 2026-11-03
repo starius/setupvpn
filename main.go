@@ -162,13 +162,13 @@ func generateVlessParams() (privateKeyHex, publicKeyHex, userID string, shortIds
 	return privateKeyHex, publicKeyHex, userID, shortIds
 }
 
-func installVlessConfig(privateKeyHex, userID string, shortIds []string) {
+func generateVlessConfig(privateKeyHex, userID string, shortIds []string) string {
 	shortIdsQuoted := make([]string, 0, len(shortIds))
 	for _, shortId := range shortIds {
 		shortIdsQuoted = append(shortIdsQuoted, fmt.Sprintf("%q", shortId))
 	}
 
-	var xrayConfigContent = fmt.Sprintf(`{
+	return fmt.Sprintf(`{
   "log": {
     "loglevel": "none"
   },
@@ -231,8 +231,10 @@ func installVlessConfig(privateKeyHex, userID string, shortIds []string) {
   ]
 }
 `, userID, *vlessDomain, privateKeyHex, strings.Join(shortIdsQuoted, ","))
+}
 
-	if err := os.WriteFile(xrayConfig, []byte(xrayConfigContent), 0644); err != nil {
+func installVlessConfig(privateKeyHex, userID string, shortIds []string) {
+	if err := os.WriteFile(xrayConfig, []byte(generateVlessConfig(privateKeyHex, userID, shortIds)), 0644); err != nil {
 		panic(err)
 	}
 }
@@ -370,25 +372,25 @@ func startAndCheckVless(myIp string) {
 
 const singboxConfigTemplate = `{
   "dns": {
-    "independent_cache": true,
     "rules": [
       {
         "query_type": [
           32,
           33
         ],
-        "server": "dns-block"
+        "action": "reject"
       },
       {
         "domain_suffix": ".lan",
-        "server": "dns-block"
+        "action": "reject"
       }
     ],
     "servers": [
       {
-        "address": "https://8.8.8.8/dns-query",
+        "type": "https",
+        "server": "8.8.8.8",
+        "path": "/dns-query",
         "detour": "proxy",
-        "strategy": "",
         "tag": "dns-remote"
       }
     ]
@@ -396,13 +398,9 @@ const singboxConfigTemplate = `{
   "inbounds": [
     {
       "auto_route": true,
-      "domain_strategy": "",
-      "endpoint_independent_nat": true,
-      "inet4_address": "172.19.0.1/28",
+      "address": ["172.19.0.1/28"],
       "interface_name": "nekoray-tun",
       "mtu": 1500,
-      "sniff": true,
-      "sniff_override_destination": false,
       "stack": "gvisor",
       "strict_route": false,
       "tag": "tun-in",
@@ -414,7 +412,6 @@ const singboxConfigTemplate = `{
   },
   "outbounds": [
     {
-      "domain_strategy": "",
       "flow": "xtls-rprx-vision",
       "packet_encoding": "xudp",
       "server": %[1]q,
@@ -438,10 +435,6 @@ const singboxConfigTemplate = `{
       },
       "type": "vless",
       "uuid": %[3]q
-    },
-    {
-      "tag": "dns-remote",
-      "type": "dns"
     }
   ],
   "route": {
@@ -449,7 +442,10 @@ const singboxConfigTemplate = `{
     "final": "proxy",
     "rules": [
       {
-        "outbound": "dns-remote",
+        "action": "sniff"
+      },
+      {
+        "action": "hijack-dns",
         "protocol": "dns"
       }
     ]
@@ -482,12 +478,12 @@ func generateVlessClientConfigs(publicKeyHex, userID string, shortIds []string, 
 		})
 	}
 
-	readmeContent := fmt.Sprintf(`To run on Linux, download https://github.com/SagerNet/sing-box/releases/download/v1.3.6/sing-box-1.3.6-linux-amd64v3.tar.gz
-(Sha256 is 10f0c2f12e594af112594af9e54fae0c0d79cd91d2460d09377a89176a24141f )
+	readmeContent := fmt.Sprintf(`To run on Linux, download https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz
+(Sha256 is 699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968 )
 
 Version for arm64 is:
-https://github.com/SagerNet/sing-box/releases/download/v1.3.6/sing-box-1.3.6-linux-arm64.tar.gz
-5761eaf3ca9a996b4592975cbdf4ad7e1b7accf7719a8bbc659df88301e5911c
+https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64.tar.gz
+436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26
 
 Run:
 $ sudo sing-box run -c sing-box-config-01.json

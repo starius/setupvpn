@@ -1,13 +1,29 @@
 # setupvpn
 Server-side wireguard and VLESS installer written in Go
 
-Build the binary:
+Build the binary with Go 1.27.3 or newer:
 ```
 $ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -o setupvpn-amd64
 $ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -o setupvpn-arm64
 ```
 
 Or get the binary from https://github.com/starius/setupvpn/releases
+
+The installer pins [Xray 26.10.31](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31).
+Generated Linux client instructions pin [sing-box 1.14.4](https://github.com/SagerNet/sing-box/releases/tag/v1.14.4).
+Download URLs and SHA-256 checksums cover amd64 and arm64. The sing-box configs
+use the current DNS server and routing formats and require the pinned client
+version; older clients may not accept them.
+
+To validate generated configs with these release binaries, run:
+
+```
+XRAY_BIN=/absolute/path/to/xray SING_BOX_BIN=/absolute/path/to/sing-box go test -v ./...
+go vet ./...
+```
+
+The compatibility tests skip a binary's checks when its environment variable is
+unset. They do not install services or change network settings.
 
 Put it to your server and run under root.
 It will install wireguard and/or/ VLESS servers and produce a directory with
