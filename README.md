@@ -9,42 +9,86 @@ $ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buil
 
 Or get the binary from https://github.com/starius/setupvpn/releases
 
-The installer pins [Xray 26.10.31](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31).
-Generated Linux client instructions pin [sing-box 1.14.4](https://github.com/SagerNet/sing-box/releases/tag/v1.14.4).
-Download URLs and SHA-256 checksums cover amd64 and arm64. The sing-box configs
-use the current DNS server and routing formats and require the pinned client
-version; older clients may not accept them.
+The VLESS setup uses [Xray 26.10.31](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31)
+on the server and Linux clients, and [v2rayNG 2.3.14](https://github.com/2dust/v2rayNG/releases/tag/2.3.14)
+or newer on Android. Both ML-DSA-65 server authentication and hybrid
+X25519MLKEM768 key exchange are enabled. Linux downloads for amd64 and arm64
+are pinned with SHA-256 checksums.
 
-To validate generated configs with these release binaries, run:
+Copy the setupvpn binary to your server and run it as root. For VLESS only:
 
+```sh
+sudo ./setupvpn-amd64 -skip-wireguard
 ```
-XRAY_BIN=/absolute/path/to/xray SING_BOX_BIN=/absolute/path/to/sing-box go test -v ./...
+
+Without the skip flags, it sets up both VLESS and WireGuard (WireGuard and
+`wg-quick` must already be installed). The installer selects a REALITY target
+automatically, checks its TLS 1.3, HTTP/2, ML-KEM and certificate-chain size,
+and verifies an authenticated HTTPS request through the new tunnel before
+reporting success. `-vless-domain` optionally selects a specific target; an
+incompatible target is rejected rather than silently reducing protection.
+
+Copy the generated `vless` directory to each client. No JSON edits are needed:
+
+- **Android:** install v2rayNG from the official release above, then import the
+  complete line from `v2rayng-01.txt` using **Add (+) → Import from clipboard**.
+  Select the profile and start the VPN. The link includes the ML-DSA verification
+  key (`pqv`), so replace old links when migrating.
+
+  If Start does nothing and no VPN permission prompt appears, check **Android
+  Settings → VPN**. Turn off **Always-on VPN** for any other VPN app (such as
+  NekoBox), then start v2rayNG again and accept the permission prompt. Android
+  can silently prevent a new VPN app from connecting while another app is set
+  as always-on. Once connected, you can enable Always-on VPN for v2rayNG instead.
+- **Linux, connect now:** run `sudo sh ./start-linux.sh` in that directory.
+  It downloads the verified Xray binary, sets up IPv4/IPv6 Internet routes and
+  DNS, and restores them on Ctrl+C. Requires `curl`, `unzip`, `sha256sum`,
+  `ip` and `flock` (`sudo apt-get install curl unzip iproute2 util-linux` on Debian/Ubuntu).
+- **Linux, connect at boot:** run `sudo sh ./install-linux.sh` on a systemd
+  machine. This installs and starts `setupvpn-client.service`. Stop it with
+  `sudo systemctl disable --now setupvpn-client`.
+- **Linux, SOCKS only:** run `sh ./start-linux.sh --socks` for a proxy on
+  `127.0.0.1:10808`, without changing routes or DNS.
+
+Each client number has `xray-tun-NN.json`, `xray-socks-NN.json`, and
+`v2rayng-NN.txt`. The scripts default to `01`; append `02`, etc., to choose
+another profile. Keep all generated files private. The generated README also
+contains these instructions and the server details.
+
+Linux's TUN routes are active while Xray runs; this is not a persistent kill
+switch. DNS uses systemd-resolved when available, otherwise the launcher saves
+and temporarily updates `/etc/resolv.conf`, restoring it when stopped. After
+an abrupt interruption, the saved static resolver is recovered on next start.
+
+Run the checks with the pinned Xray binary:
+
+```sh
+XRAY_BIN=/absolute/path/to/xray go test -v ./...
 go vet ./...
 ```
 
-The compatibility tests skip a binary's checks when its environment variable is
-unset. They do not install services or change network settings.
-
-Put it to your server and run under root.
-It will install wireguard and/or/ VLESS servers and produce a directory with
-client configs and README.
+The integration test uses only loopback listeners. It exercises a real
+ML-KEM/ML-DSA REALITY tunnel and checks that an incorrect signature key is
+rejected; it never creates a TUN interface or changes routes. It skips when
+`XRAY_BIN` is unset. Linux TUN and DNS should be tested in a separate network
+namespace or disposable client, not on the machine running a remote session.
 
 Flags:
 
 ```
 Usage of ./setupvpn:
   -encrypt
-        Put client configs into encrypted zip
+        Put client configs into an encrypted tar.gz archive
   -n-clients int
-        Number of client configs to generate (default 50)
+        Number of client profiles to generate (default 50)
   -server-ip string
         Server IP address (leave empty to determine automatically)
   -skip-vless
-        Skip installing VLESS
+        Skip installing Xray (VLESS)
   -skip-wireguard
         Skip installing Wireguard
   -vless-domain string
-        Masking domain used by VLESS server (default "www.google.com")
+        REALITY target domain (empty = automatically select an ML-KEM-capable target)
   -wireguard-port int
         Port for wireguard to listen in (0 = random)
 ```

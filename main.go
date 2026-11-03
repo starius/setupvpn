@@ -42,19 +42,23 @@ const (
 )
 
 var (
-	encrypt       = flag.Bool("encrypt", false, "Put client configs into encrypted zip")
-	skipVless     = flag.Bool("skip-vless", false, "Skip installing VLESS")
+	encrypt       = flag.Bool("encrypt", false, "Put client configs into an encrypted tar.gz archive")
+	skipVless     = flag.Bool("skip-vless", false, "Skip installing Xray (VLESS)")
 	skipWireguard = flag.Bool("skip-wireguard", false, "Skip installing Wireguard")
 	serverIp      = flag.String("server-ip", "", "Server IP address (leave empty to determine automatically)")
-	vlessDomain   = flag.String("vless-domain", "www.google.com", "Masking domain used by VLESS server")
-	nClients      = flag.Int("n-clients", 50, "Number of client configs to generate")
+	vlessDomain   = flag.String("vless-domain", "", "REALITY target domain (empty = automatically select an ML-KEM-capable target)")
+	nClients      = flag.Int("n-clients", 50, "Number of client profiles to generate")
 	wireguardPort = flag.Int("wireguard-port", 0, "Port for wireguard to listen in (0 = random)")
 )
 
 func installVlessExe() {
-	res, err := http.Get(vlessUrl)
+	res, err := (&http.Client{Timeout: 3 * time.Minute}).Get(vlessUrl)
 	if err != nil {
 		panic(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		res.Body.Close()
+		panic(fmt.Errorf("download Xray: HTTP %d", res.StatusCode))
 	}
 	vlessZipBytes, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -74,7 +78,7 @@ func installVlessExe() {
 	if err != nil {
 		panic(err)
 	}
-	xrayExeFile, err := os.OpenFile(xrayExe, os.O_CREATE|os.O_WRONLY, 0755)
+	xrayExeFile, err := os.OpenFile(xrayExe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		panic(err)
 	}
@@ -163,7 +167,7 @@ func generateVlessParams() (privateKeyHex, publicKeyHex, userID string, shortIds
 	return privateKeyHex, publicKeyHex, userID, shortIds
 }
 
-func generateVlessConfig(privateKeyHex, userID string, shortIds []string) string {
+func generateVlessConfig(privateKeyHex, userID string, shortIds []string, mldsaSeed string) string {
 	shortIdsQuoted := make([]string, 0, len(shortIds))
 	for _, shortId := range shortIds {
 		shortIdsQuoted = append(shortIdsQuoted, fmt.Sprintf("%q", shortId))
@@ -203,6 +207,7 @@ func generateVlessConfig(privateKeyHex, userID string, shortIds []string) string
             %[2]q
           ],
           "privateKey": %[3]q,
+          "mldsa65Seed": %[5]q,
           "minClientVer": "",
           "maxClientVer": "",
           "maxTimeDiff": 0,
@@ -231,11 +236,11 @@ func generateVlessConfig(privateKeyHex, userID string, shortIds []string) string
     }
   ]
 }
-`, userID, *vlessDomain, privateKeyHex, strings.Join(shortIdsQuoted, ","))
+`, userID, *vlessDomain, privateKeyHex, strings.Join(shortIdsQuoted, ","), mldsaSeed)
 }
 
-func installVlessConfig(privateKeyHex, userID string, shortIds []string) {
-	if err := os.WriteFile(xrayConfig, []byte(generateVlessConfig(privateKeyHex, userID, shortIds)), 0644); err != nil {
+func installVlessConfig(privateKeyHex, userID string, shortIds []string, mldsaSeed string) {
+	if err := os.WriteFile(xrayConfig, []byte(generateVlessConfig(privateKeyHex, userID, shortIds, mldsaSeed)), 0644); err != nil {
 		panic(err)
 	}
 }
@@ -267,6 +272,9 @@ WantedBy=multi-user.target
 	systemctlExe, err := exec.LookPath("systemctl")
 	if err != nil {
 		panic(err)
+	}
+	if output, err := exec.Command(systemctlExe, "daemon-reload").CombinedOutput(); err != nil {
+		panic(fmt.Errorf("systemctl daemon-reload: %w: %s", err, output))
 	}
 	cmd := exec.Command(systemctlExe, "enable", "xray")
 	if err := cmd.Run(); err != nil {
@@ -344,19 +352,23 @@ func httpsWorks(myIp string) bool {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if addr == fmt.Sprintf("%s:443", *vlessDomain) {
-				addr = fmt.Sprintf("%s:443", myIp)
+				addr = net.JoinHostPort(myIp, "443")
 			}
 			return dialer.DialContext(ctx, network, addr)
 
 		},
 	}
-	client := &http.Client{Transport: tr}
-	_, err := client.Get(fmt.Sprintf("https://%s/", *vlessDomain))
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 15 * time.Second}
+	res, err := client.Get(fmt.Sprintf("https://%s/", *vlessDomain))
+	if res != nil {
+		res.Body.Close()
+	}
 	return err == nil
 }
 
 func checkTcpServer(address string) bool {
-	conn, err := net.Dial("tcp", address)
+	conn, err := net.DialTimeout("tcp", address, time.Second)
 	if err != nil {
 		return false
 	}
@@ -380,7 +392,11 @@ func startAndCheckVless(myIp string) {
 		panic(err)
 	}
 
-	for !checkTcpServer(fmt.Sprintf("%s:443", myIp)) {
+	deadline := time.Now().Add(30 * time.Second)
+	for !checkTcpServer(net.JoinHostPort(myIp, "443")) {
+		if time.Now().After(deadline) {
+			panic("Xray did not start within 30 seconds; check journalctl -u xray")
+		}
 		fmt.Println("Waiting for server to start on port 443.")
 		time.Sleep(time.Second)
 	}
@@ -390,163 +406,40 @@ func startAndCheckVless(myIp string) {
 	}
 }
 
-const singboxConfigTemplate = `{
-  "dns": {
-    "rules": [
-      {
-        "query_type": [
-          32,
-          33
-        ],
-        "action": "reject"
-      },
-      {
-        "domain_suffix": ".lan",
-        "action": "reject"
-      }
-    ],
-    "servers": [
-      {
-        "type": "https",
-        "server": "8.8.8.8",
-        "path": "/dns-query",
-        "detour": "proxy",
-        "tag": "dns-remote"
-      }
-    ]
-  },
-  "inbounds": [
-    {
-      "auto_route": true,
-      "address": ["172.19.0.1/28"],
-      "interface_name": "nekoray-tun",
-      "mtu": 1500,
-      "stack": "gvisor",
-      "strict_route": false,
-      "tag": "tun-in",
-      "type": "tun"
-    }
-  ],
-  "log": {
-    "level": "info"
-  },
-  "outbounds": [
-    {
-      "flow": "xtls-rprx-vision",
-      "packet_encoding": "xudp",
-      "server": %[1]q,
-      "server_port": 443,
-      "tag": "proxy",
-      "tls": {
-        "alpn": [
-          "h2"
-        ],
-        "enabled": true,
-        "reality": {
-          "enabled": true,
-          "public_key": %[4]q,
-          "short_id": %[5]q
-        },
-        "server_name": %[2]q,
-        "utls": {
-          "enabled": true,
-          "fingerprint": "chrome"
-        }
-      },
-      "type": "vless",
-      "uuid": %[3]q
-    }
-  ],
-  "route": {
-    "auto_detect_interface": true,
-    "final": "proxy",
-    "rules": [
-      {
-        "action": "sniff"
-      },
-      {
-        "action": "hijack-dns",
-        "protocol": "dns"
-      }
-    ]
-  }
-}
-`
-
-const nekoboxConfigTemplate = `vless://%[3]s@%[1]s:443/?type=tcp&encryption=none&flow=xtls-rprx-vision&sni=%[2]s&alpn=h2&fp=chrome&security=reality&pbk=%[4]s&sid=%[5]s&packetEncoding=xudp#conn1
-`
-
 type file struct {
 	name    string
 	content []byte
 }
 
-func generateVlessClientConfigs(publicKeyHex, userID string, shortIds []string, myIp string) (files []file) {
-	for i := 1; i <= *nClients; i++ {
-		var name, configTemplate string
-		if i < *nClients/2 {
-			name = fmt.Sprintf("sing-box-config-%02d.json", i)
-			configTemplate = singboxConfigTemplate
-		} else {
-			name = fmt.Sprintf("nekobox-link-%02d.txt", i)
-			configTemplate = nekoboxConfigTemplate
-		}
-		config := fmt.Sprintf(configTemplate, myIp, *vlessDomain, userID, publicKeyHex, shortIds[i-1])
-		files = append(files, file{
-			name:    name,
-			content: []byte(config),
-		})
-	}
-
-	readmeContent := fmt.Sprintf(`To run on Linux, download https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz
-(Sha256 is 699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968 )
-
-Version for arm64 is:
-https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64.tar.gz
-436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26
-
-Run:
-$ sudo sing-box run -c sing-box-config-01.json
-Use any of sing-box-config-XX.json
-You can use different config on different machines.
-
-To run on Android, install APK from https://github.com/MatsuriDayo/NekoBoxForAndroid/releases
-then open any of nekobox-link-XX.txt, copy the link, click (+) button and
-select "Import from clipboard". Enable the tunnel by clicking pink
-button in the bottom of the app.
-
-Server config: %s
-Restart server: systemctl restart xray
-
-See https://forum.qubes-os.org/t/vless-obfuscation-vpn/20438 for more info.
-`, xrayConfig)
-	files = append(files, file{
-		name:    "README",
-		content: []byte(readmeContent),
-	})
-
-	return files
-}
-
 func installVless(myIp string) []file {
-	if checkTcpServer(fmt.Sprintf("%s:443", myIp)) {
+	if checkTcpServer(net.JoinHostPort(myIp, "443")) {
 		panic("port 443 on the machine is already used")
 	}
 
+	domain, err := selectRealityTarget(*vlessDomain)
+	if err != nil {
+		panic(err)
+	}
+	*vlessDomain = domain
+	fmt.Println("REALITY target:", domain)
 	if err := os.Mkdir(xrayDir, 0755); os.IsExist(err) {
 		panic("Remove " + xrayDir)
 	} else if err != nil {
 		panic(err)
 	}
-
 	privateKeyHex, publicKeyHex, userID, shortIds := generateVlessParams()
+	seed, verify := generateMLDSAKeys()
 	installVlessExe()
-	installVlessConfig(privateKeyHex, userID, shortIds)
+	installVlessConfig(privateKeyHex, userID, shortIds, seed)
 	installVlessService()
 	improvePerformace()
 	startAndCheckVless(myIp)
 
-	return generateVlessClientConfigs(publicKeyHex, userID, shortIds, myIp)
+	if err := verifyVlessConnection(xrayExe, xrayClientConfig(publicKeyHex, verify, userID, shortIds[0], myIp, false)); err != nil {
+		panic(fmt.Errorf("Xray tunnel self-test failed: %w", err))
+	}
+	fmt.Println("Xray tunnel verified: X25519MLKEM768 + ML-DSA-65")
+	return generateVlessClientConfigs(publicKeyHex, verify, userID, shortIds, myIp)
 }
 
 func generateWireguardKeys() (privateKey, publicKey string) {
@@ -739,6 +632,9 @@ func installWireguard(myIp string) []file {
 
 func main() {
 	flag.Parse()
+	if *nClients < 1 {
+		panic("-n-clients must be at least 1")
+	}
 
 	myIp := getMyIp()
 
