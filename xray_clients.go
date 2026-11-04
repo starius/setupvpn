@@ -182,9 +182,21 @@ On Debian/Ubuntu: sudo apt-get install curl unzip iproute2 util-linux
 LINUX: CONNECT AUTOMATICALLY AT BOOT (systemd)
   sudo sh ./install-linux.sh
 Or choose a profile: sudo sh ./install-linux.sh 02
-The installer copies just that profile and Xray into /etc/setupvpn-client,
-enables setupvpn-client.service, and starts it immediately.
-Stop and disable: sudo systemctl disable --now setupvpn-client
+The installer copies just that profile and Xray and starts setupvpn-client.service.
+On ordinary Linux it installs into /etc/setupvpn-client and enables the service.
+Stop and disable on ordinary Linux: sudo systemctl disable --now setupvpn-client
+
+Qubes OS is detected automatically. Run the installer inside the app qube
+that should use the VPN. It installs into /rw/config/setupvpn-client, which
+survives AppVM restarts, and adds a Qubes boot hook to restore the systemd
+service and start it at every boot. Existing rc.local commands are preserved.
+Install the prerequisites listed above in the qube's template so they also
+survive restarts. Disposable qubes discard the installation when destroyed.
+Stop and persistently disable on Qubes:
+  sudo sh /rw/config/setupvpn-client/service.sh disable
+Re-enable and start on Qubes:
+  sudo sh /rw/config/setupvpn-client/service.sh enable
+
 Status/logs: sudo systemctl status setupvpn-client; sudo journalctl -u setupvpn-client
 If the machine lost power during a session, DNS is restored on the next start.
 

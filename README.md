@@ -46,7 +46,17 @@ Copy the generated `vless` directory to each client. No JSON edits are needed:
   `ip` and `flock` (`sudo apt-get install curl unzip iproute2 util-linux` on Debian/Ubuntu).
 - **Linux, connect at boot:** run `sudo sh ./install-linux.sh` on a systemd
   machine. This installs and starts `setupvpn-client.service`. Stop it with
-  `sudo systemctl disable --now setupvpn-client`.
+  `sudo systemctl disable --now setupvpn-client` on ordinary Linux.
+- **Qubes OS, connect at boot:** run the same `sudo sh ./install-linux.sh`
+  inside the app qube that should use the VPN. It detects Qubes and installs
+  the selected profile, Xray, and service files in `/rw/config/setupvpn-client`.
+  A [Qubes boot hook](https://doc.qubes-os.org/en/r4.3/user/advanced-topics/config-files.html)
+  restores the systemd service and starts it after each AppVM restart. It uses
+  `rc.local.d` when supported, otherwise preserves and updates `rc.local`.
+  Install the prerequisites in the qube's template so they persist too.
+  Stop and persistently disable with
+  `sudo sh /rw/config/setupvpn-client/service.sh disable`; use `enable` to
+  re-enable and start it. Disposable qubes discard the installation when destroyed.
 - **Linux, SOCKS only:** run `sh ./start-linux.sh --socks` for a proxy on
   `127.0.0.1:10808`, without changing routes or DNS.
 
@@ -72,6 +82,9 @@ ML-KEM/ML-DSA REALITY tunnel and checks that an incorrect signature key is
 rejected; it never creates a TUN interface or changes routes. It skips when
 `XRAY_BIN` is unset. Linux TUN and DNS should be tested in a separate network
 namespace or disposable client, not on the machine running a remote session.
+Installer tests use an isolated filesystem and network namespace with a mocked
+service manager. They check ordinary Linux and Qubes startup, reinstallation,
+and persistent disabling; they skip if Linux user namespaces are unavailable.
 
 Flags:
 
